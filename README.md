@@ -1,1 +1,32 @@
-YOLO side dish classifier prototype. Source files follow.
+# 반찬량 체크 (로컬 실험용)
+
+`bonbanchan`의 업로드 화면을 바탕으로 만든 YOLO 사진 분류 실험입니다. Claude API와 Supabase 없이 로컬 PC에서 사진과 실측 중량을 수집하고 `부족 / 정상 / 초과` 분류 모델을 학습합니다. 사진으로 g을 직접 측정하지 않습니다.
+
+## 실행 (Windows PowerShell)
+
+Python 3.11 이상과 Node.js 20 이상을 설치한 뒤 **서로 다른 터미널 두 개**에서 실행하세요.
+
+```powershell
+cd changjorim
+py -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
+.\.venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
+```
+
+```powershell
+cd changjorim
+npm ci
+npm run dev
+```
+
+`http://localhost:3000/admin`에서 반찬명과 기준 중량을 입력하고 입력 칸 바깥을 눌러 저장하세요. 기본 허용 오차는 ±10%입니다. 저울로 용기 무게를 제외한 반찬 중량을 측정하고, 실측 중량을 입력한 뒤 사진을 등록합니다. 부족·정상·초과 사진을 각각 최소 5장 넣은 다음 `YOLO 모델 학습하기`를 누릅니다. 이 수량은 실행 검증용 최소치입니다. 실제 사용 전에는 각 구간에서 여러 날 찍은 독립 사진을 더 모아 평가하세요. 첫 학습 때 사전 학습 모델이 다운로드됩니다. CPU에서는 오래 걸릴 수 있습니다.
+
+학습 완료 후 `http://localhost:3000/weight-check`에서 새 사진을 판정합니다. 모델 확률은 정확도나 중량 측정값이 아닙니다. 확률이 75% 미만이면 `확인 필요`로 표시합니다. 실제 중량은 저울로 확인하세요.
+
+## 데이터와 운영 범위
+
+- 이미지·실측값은 `data/`에 저장되며 git에 올라가지 않습니다. 모델은 `data/models/{dishId}/best.pt`에 저장됩니다. `data/`를 백업하세요.
+- 사진 등록 후에는 기준 중량 변경과 반찬 삭제가 제한됩니다. 기준을 변경하려면 새 반찬으로 등록하세요.
+- 한 종류의 반찬과 동일한 용기·각도·조명으로 시작하세요. 같은 담음 상태를 여러 장 찍어 학습과 검증에 함께 넣으면 성능이 부풀려집니다. 자동 분할은 이런 중복을 식별하지 못합니다.
+- 로그인과 권한 관리가 없는 로컬 실험입니다. 공개 인터넷에 연결하지 마세요. 원본 화면의 공개 임시 암호는 제거했습니다.
+- Next.js는 `/api/*`를 로컬 Python API로 전달합니다. 배포 시에는 별도 인증, 영구 저장소, 모델 서버가 필요합니다.
