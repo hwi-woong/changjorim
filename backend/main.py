@@ -9,7 +9,7 @@ import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse
 from PIL import Image, UnidentifiedImageError
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -126,7 +126,32 @@ def sample_counts(dish_id: str):
         counts = dict.fromkeys(LABELS, 0)
         for photo in con.execute("SELECT weight FROM photos WHERE dish_id=?", (dish_id,)):
             counts[label(photo["weight"], dish)] += 1
-        return {"counts": counts, "modelReady": (DATA / "models" / dish_id / "best.pt").exists()}
+        recent = [
+            {
+                "id": row["id"],
+                "weightGram": row["weight"],
+                "category": label(row["weight"], dish),
+                "createdAt": row["created_at"],
+                "previewUrl": f"/api/photos/{row['id']}",
+            }
+            for row in con.execute(
+                "SELECT id, weight, created_at FROM photos WHERE dish_id=? ORDER BY created_at DESC, rowid DESC LIMIT 12",
+                (dish_id,),
+            )
+        ]
+        return {"counts": counts, "recent": recent, "modelReady": (DATA / "models" / dish_id / "best.pt").exists()}
+
+
+@app.get("/api/photos/{photo_id}")
+def view_photo(photo_id: str):
+    with db() as con:
+        row = con.execute("SELECT path FROM photos WHERE id=?", (photo_id,)).fetchone()
+    if row is None:
+        raise HTTPException(404, "사진을 찾을 수 없습니다.")
+    path = Path(row["path"])
+    if not path.is_file() or not path.resolve().is_relative_to((DATA / "photos").resolve()):
+        raise HTTPException(404, "사진 파일을 찾을 수 없습니다.")
+    return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
 @app.post("/api/dishes/{dish_id}/reference-photos")
