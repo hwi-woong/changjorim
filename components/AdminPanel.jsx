@@ -134,8 +134,9 @@ function DishManager() {
       return;
     }
 
-    updateDishField(index, "photoStatus", "업로드 중...");
+    updateDishField(index, "photoStatus", `${files.length}장 업로드 중...`);
 
+    let uploaded = 0;
     try {
       for (const file of files) {
         const formData = new FormData();
@@ -143,11 +144,14 @@ function DishManager() {
         formData.append("weightGram", weightGram);
         const res = await fetch(`/api/dishes/${dish.id}/reference-photos`, { method: "POST", body: formData });
         if (!res.ok) throw new Error((await res.json()).detail || "업로드 실패");
+        uploaded += 1;
+        updateDishField(index, "photoStatus", `${uploaded}/${files.length}장 저장됨...`);
       }
-      updateDishField(index, "photoStatus", `${files.length}장 업로드 완료 (${weightGram}g). 다른 중량도 등록해주세요.`);
       await refreshCounts(dish.id);
+      updateDishField(index, "photoStatus", `✓ ${uploaded}장 저장 완료 (${weightGram}g). 아래 최근 등록 사진을 확인하세요.`);
     } catch (err) {
-      updateDishField(index, "photoStatus", err.message || "업로드에 실패했습니다.");
+      refreshCounts(dish.id).catch(() => {});
+      updateDishField(index, "photoStatus", `업로드 실패 (${uploaded}/${files.length}장 저장됨): ${err.message || "오류가 발생했습니다."}`);
     }
   }
 
@@ -277,7 +281,10 @@ function DishCard({ dish, onChangeName, onChangeWeight, onSave, onUploadPhotos, 
         accept="image/*"
         multiple
         className="hidden"
-        onChange={(e) => e.target.files && onUploadPhotos(e.target.files)}
+        onChange={(e) => {
+          if (e.target.files?.length) onUploadPhotos(e.target.files);
+          e.target.value = "";
+        }}
       />
       <button
         type="button"
@@ -286,12 +293,22 @@ function DishCard({ dish, onChangeName, onChangeWeight, onSave, onUploadPhotos, 
       >
         사진 추가 (여러 장은 모두 같은 실측 중량)
       </button>
-      {dish.photoStatus && <p className="mt-2 text-xs text-gray-500">{dish.photoStatus}</p>}
+      {dish.photoStatus && <p role="status" aria-live="polite" className={`mt-2 rounded-lg p-3 text-sm font-semibold ${dish.photoStatus.includes("실패") ? "bg-red-50 text-red-700" : "bg-green-50 text-green-800"}`}>{dish.photoStatus}</p>}
       <p className="mt-1 text-xs text-gray-500">용기 무게를 제외한 반찬 중량을 입력하세요.</p>
       <div className="mt-4 rounded-xl bg-gray-50 p-3 text-sm text-gray-700" role="status">
         {summary ? `등록된 사진: 부족 ${summary.counts.under}장 · 정상 ${summary.counts.normal}장 · 초과 ${summary.counts.over}장` : "반찬 정보를 저장하면 사진 수가 표시됩니다."}
         {summary?.modelReady && <p className="mt-1 font-semibold text-green-700">학습된 모델 있음</p>}
       </div>
+      {summary?.recent?.length > 0 && <section className="mt-4">
+        <h3 className="text-sm font-bold text-gray-900">최근 등록 사진 ({summary.recent.length}장 표시)</h3>
+        <div className="mt-2 grid grid-cols-3 gap-2">
+          {summary.recent.map((photo) => <div key={photo.id} className="overflow-hidden rounded-lg border border-gray-200">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={photo.previewUrl} alt={`${photo.weightGram}g 반찬 사진`} className="aspect-square w-full object-cover" />
+            <p className="p-1 text-center text-xs font-semibold text-gray-800">{photo.weightGram}g · {{ under: "부족", normal: "정상", over: "초과" }[photo.category]}</p>
+          </div>)}
+        </div>
+      </section>}
       <button type="button" onClick={onTrain} className="mt-4 w-full rounded-full bg-gray-900 py-3 text-sm font-bold text-white">YOLO 모델 학습하기</button>
       <p className="mt-2 text-xs text-gray-500">현재 모델은 부족·정상·초과 사진을 각각 최소 5장 등록해야 학습할 수 있습니다.</p>
       {jobStatus && <p role="status" className="mt-2 text-sm font-semibold text-gray-800">{jobStatus}</p>}
