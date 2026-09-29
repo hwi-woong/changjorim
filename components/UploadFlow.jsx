@@ -78,8 +78,8 @@ export default function UploadFlow() {
       setError("이미지 파일만 업로드할 수 있습니다.");
       return;
     }
-    if (selected.size > 10 * 1024 * 1024) {
-      setError("파일 용량은 10MB 이하로 업로드해주세요.");
+    if (selected.size > 4 * 1024 * 1024) {
+      setError("사진은 4MB 이하로 줄여서 업로드해주세요.");
       return;
     }
 
