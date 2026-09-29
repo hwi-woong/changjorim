@@ -129,6 +129,10 @@ function DishManager() {
     }
     const files = Array.from(fileList);
     if (files.length === 0) return;
+    if (files.some((file) => file.size > 4 * 1024 * 1024)) {
+      updateDishField(index, "photoStatus", "사진은 각각 4MB 이하로 줄여서 업로드해주세요.");
+      return;
+    }
     if (!Number.isFinite(Number(weightGram)) || Number(weightGram) <= 0) {
       updateDishField(index, "photoStatus", "저울로 잰 실측 중량을 먼저 입력해주세요.");
       return;
