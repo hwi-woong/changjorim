@@ -2,26 +2,45 @@
 from __future__ import annotations
 
 import json
+import os
 import random
+import secrets
 import shutil
 import sqlite3
 import threading
 import uuid
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 ROOT = Path(__file__).resolve().parent.parent
-DATA = ROOT / "data"
-DATA.mkdir(exist_ok=True)
+DATA = Path(os.environ.get("DATA_DIR", str(ROOT / "data"))).resolve()
+DATA.mkdir(parents=True, exist_ok=True)
 DB = DATA / "samples.sqlite3"
 ALLOWED = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp"}
 MAX_SIZE = 10 * 1024 * 1024
 LABELS = ("under", "normal", "over")
 app = FastAPI(title="반찬량 체크 로컬 API")
 jobs: dict[str, dict] = {}
+
+
+@app.middleware("http")
+async def require_api_token(request: Request, call_next):
+    token = os.environ.get("API_SHARED_SECRET")
+    if request.url.path == "/health":
+        return await call_next(request)
+    if os.environ.get("DEPLOYED") == "1" and not token:
+        raise RuntimeError("API_SHARED_SECRET must be configured for deployment")
+    if token and not secrets.compare_digest(request.headers.get("x-api-secret", ""), token):
+        return JSONResponse({"detail": "인증이 필요합니다."}, status_code=401)
+    return await call_next(request)
+
+
+@app.get("/health")
+def health():
+    return {"ok": True}
 
 
 def db():
@@ -76,6 +95,16 @@ def prepare_classification_image(source: Path, destination: Path):
     with Image.open(source) as im:
         square = ImageOps.pad(im.convert("RGB"), (320, 320), method=Image.Resampling.BICUBIC, color=(128, 128, 128))
         square.save(destination, "JPEG", quality=95)
+
+
+def photo_path(row):
+    """Resolve both new relative paths and legacy absolute paths after a data move."""
+    stored = str(row["path"])
+    filename = PureWindowsPath(stored).name
+    candidate = (DATA / "photos" / row["dish_id"] / filename).resolve()
+    if candidate.is_file() and candidate.is_relative_to((DATA / "photos").resolve()):
+        return candidate
+    raise FileNotFoundError(f"사진 파일을 찾을 수 없습니다: {filename}")
 
 
 @app.get("/api/dishes")
@@ -154,11 +183,12 @@ def sample_counts(dish_id: str):
 @app.get("/api/photos/{photo_id}")
 def view_photo(photo_id: str):
     with db() as con:
-        row = con.execute("SELECT path FROM photos WHERE id=?", (photo_id,)).fetchone()
+        row = con.execute("SELECT dish_id, path FROM photos WHERE id=?", (photo_id,)).fetchone()
     if row is None:
         raise HTTPException(404, "사진을 찾을 수 없습니다.")
-    path = Path(row["path"])
-    if not path.is_file() or not path.resolve().is_relative_to((DATA / "photos").resolve()):
+    try:
+        path = photo_path(row)
+    except FileNotFoundError:
         raise HTTPException(404, "사진 파일을 찾을 수 없습니다.")
     return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
@@ -170,7 +200,7 @@ async def add_reference(dish_id: str, photo: UploadFile = File(...), weightGram:
         if not 0 < weightGram <= 10000:
             raise HTTPException(400, "실측 중량은 0~10000g이어야 합니다.")
         path = await save_image(photo, DATA / "photos" / dish_id)
-        con.execute("INSERT INTO photos (id, dish_id, weight, path) VALUES (?, ?, ?, ?)", (uuid.uuid4().hex, dish_id, weightGram, str(path)))
+        con.execute("INSERT INTO photos (id, dish_id, weight, path) VALUES (?, ?, ?, ?)", (uuid.uuid4().hex, dish_id, weightGram, str(path.relative_to(DATA))))
         return {"uploaded": 1, "weightGram": weightGram, "category": label(weightGram, dish_or_404(con, dish_id))}
 
 
@@ -180,8 +210,8 @@ def train_worker(dish_id, job_id):
         with db() as con:
             dish = dish_or_404(con, dish_id)
             grouped = {key: [] for key in LABELS}
-            for row in con.execute("SELECT path, weight FROM photos WHERE dish_id=? ORDER BY id", (dish_id,)):
-                grouped[label(row["weight"], dish)].append(Path(row["path"]))
+            for row in con.execute("SELECT dish_id, path, weight FROM photos WHERE dish_id=? ORDER BY id", (dish_id,)):
+                grouped[label(row["weight"], dish)].append(photo_path(row))
         # Each class needs independent examples in both train and validation.
         if any(len(items) < 5 for items in grouped.values()):
             raise ValueError("부족·정상·초과 사진을 각각 최소 5장씩 등록해주세요.")
