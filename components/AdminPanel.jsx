@@ -13,6 +13,14 @@ function DishManager() {
   const [loadError, setLoadError] = useState(null);
   const [weightGram, setWeightGram] = useState("");
   const [jobs, setJobs] = useState({});
+  const [countsByDish, setCountsByDish] = useState({});
+
+  async function refreshCounts(dishId) {
+    const response = await fetch(`/api/dishes/${dishId}/samples`);
+    if (!response.ok) throw new Error("사진 수를 불러오지 못했습니다.");
+    const summary = await response.json();
+    setCountsByDish((previous) => ({ ...previous, [dishId]: summary }));
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -25,6 +33,7 @@ function DishManager() {
       .then((data) => {
         if (cancelled) return;
         setDishes(data.map((dish) => ({ ...dish, savedName: dish.name, savedWeight: dish.baseWeightGram })));
+        data.forEach((dish) => refreshCounts(dish.id).catch(() => {}));
       })
       .catch((err) => !cancelled && setLoadError(err.message))
       .finally(() => !cancelled && setLoading(false));
@@ -58,7 +67,8 @@ function DishManager() {
     const baseWeightGram = Number(dish.baseWeightGram);
 
     if (!name || !Number.isFinite(baseWeightGram) || baseWeightGram <= 0) {
-      return; // 아직 두 값이 다 채워지지 않음 - 조용히 대기
+      updateDishField(index, "saveError", "반찬 이름과 기준 중량을 모두 입력해주세요.");
+      return;
     }
     if (name === dish.savedName && baseWeightGram === dish.savedWeight) {
       return; // 변경 없음
@@ -83,9 +93,10 @@ function DishManager() {
         setDishes((prev) =>
           prev.map((d, i) => (i === index ? { ...d, id: created.id } : d)),
         );
+        await refreshCounts(created.id);
       }
       setDishes((prev) =>
-        prev.map((d, i) => (i === index ? { ...d, savedName: name, savedWeight: baseWeightGram } : d)),
+        prev.map((d, i) => (i === index ? { ...d, savedName: name, savedWeight: baseWeightGram, saveError: null } : d)),
       );
     } catch (err) {
       setDishes((prev) =>
@@ -134,6 +145,7 @@ function DishManager() {
         if (!res.ok) throw new Error((await res.json()).detail || "업로드 실패");
       }
       updateDishField(index, "photoStatus", `${files.length}장 업로드 완료 (${weightGram}g). 다른 중량도 등록해주세요.`);
+      await refreshCounts(dish.id);
     } catch (err) {
       updateDishField(index, "photoStatus", err.message || "업로드에 실패했습니다.");
     }
@@ -141,7 +153,21 @@ function DishManager() {
 
   async function trainDish(index) {
     const dish = dishes[index];
+    if (!dish.id) {
+      updateDishField(index, "saveError", "먼저 반찬 이름과 기준 중량을 저장해주세요.");
+      return;
+    }
+    setJobs((prev) => ({ ...prev, [dish.id]: "학습 조건 확인 중..." }));
     try {
+      const summaryResponse = await fetch(`/api/dishes/${dish.id}/samples`);
+      if (!summaryResponse.ok) throw new Error("사진 수를 확인하지 못했습니다.");
+      const summary = await summaryResponse.json();
+      setCountsByDish((prev) => ({ ...prev, [dish.id]: summary }));
+      const missing = ["under", "normal", "over"].filter((key) => summary.counts[key] < 5);
+      if (missing.length) {
+        const names = { under: "부족", normal: "정상", over: "초과" };
+        throw new Error(`사진 부족: ${missing.map((key) => `${names[key]} ${summary.counts[key]}/5장`).join(", ")}. 정량 사진만으로는 현재 3분류 모델을 학습할 수 없습니다.`);
+      }
       const res = await fetch(`/api/dishes/${dish.id}/train`, { method: "POST" });
       const body = await res.json();
       if (!res.ok) throw new Error(body.detail || "학습 요청 실패");
@@ -153,6 +179,7 @@ function DishManager() {
           if (!response.ok || job.status === "failed" || job.status === "completed") {
             clearInterval(timer);
             setJobs((prev) => ({ ...prev, [dish.id]: job.status === "completed" ? "학습 완료 — 판정 가능" : `학습 실패: ${job.message || job.detail}` }));
+            if (job.status === "completed") refreshCounts(dish.id).catch(() => {});
           }
         } catch (err) {
           clearInterval(timer);
@@ -181,12 +208,13 @@ function DishManager() {
             dish={dish}
             onChangeName={(value) => updateDishField(index, "name", value)}
             onChangeWeight={(value) => updateDishField(index, "baseWeightGram", value)}
-            onBlurField={() => saveDish(index)}
+            onSave={() => saveDish(index)}
             onUploadPhotos={(files) => uploadPhotos(index, files)}
             weightGram={weightGram}
             onWeightGramChange={setWeightGram}
             onTrain={() => trainDish(index)}
             jobStatus={jobs[dish.id]}
+            summary={countsByDish[dish.id]}
             onDelete={() => deleteDish(index)}
           />
         ))}
@@ -212,7 +240,7 @@ function DishManager() {
   );
 }
 
-function DishCard({ dish, onChangeName, onChangeWeight, onBlurField, onUploadPhotos, onDelete, weightGram, onWeightGramChange, onTrain, jobStatus }) {
+function DishCard({ dish, onChangeName, onChangeWeight, onSave, onUploadPhotos, onDelete, weightGram, onWeightGramChange, onTrain, jobStatus, summary }) {
   const fileInputRef = useRef(null);
 
   return (
@@ -222,7 +250,6 @@ function DishCard({ dish, onChangeName, onChangeWeight, onBlurField, onUploadPho
         type="text"
         value={dish.name}
         onChange={(e) => onChangeName(e.target.value)}
-        onBlur={onBlurField}
         placeholder="샘플 반찬"
         className="mt-2 w-full rounded-2xl border border-gray-200 px-4 py-3 text-base text-gray-900 focus:border-green-600 focus:outline-none"
       />
@@ -233,12 +260,13 @@ function DishCard({ dish, onChangeName, onChangeWeight, onBlurField, onUploadPho
         min="1"
         value={dish.baseWeightGram}
         onChange={(e) => onChangeWeight(e.target.value)}
-        onBlur={onBlurField}
         placeholder="25"
         className="mt-2 w-full rounded-2xl border border-gray-200 px-4 py-3 text-base text-gray-900 focus:border-green-600 focus:outline-none"
       />
 
       {dish.saveError && <p className="mt-2 text-xs font-medium text-red-600">{dish.saveError}</p>}
+      <button type="button" onClick={onSave} className="mt-3 w-full rounded-full border border-gray-400 py-2 text-sm font-bold text-gray-800">반찬 정보 저장</button>
+      <p className="mt-2 text-xs text-gray-500">{dish.id ? "반찬 정보 저장됨" : "저장 후 사진을 등록할 수 있습니다."}</p>
 
       <label className="mt-4 block text-sm font-bold text-gray-900">사진의 실측 중량 (g)</label>
       <input type="number" min="0.1" step="0.1" value={weightGram} onChange={(e) => onWeightGramChange(e.target.value)} placeholder="저울 측정값" className="mt-2 w-full rounded-2xl border border-gray-200 px-4 py-3 text-gray-900" />
@@ -259,11 +287,14 @@ function DishCard({ dish, onChangeName, onChangeWeight, onBlurField, onUploadPho
         사진 추가 (여러 장은 모두 같은 실측 중량)
       </button>
       {dish.photoStatus && <p className="mt-2 text-xs text-gray-500">{dish.photoStatus}</p>}
-      <p className="mt-1 text-xs text-gray-400">
-        용기 무게를 제외한 반찬 중량을 입력하세요. 부족·정상·초과를 각각 최소 5장 등록해야 학습할 수 있습니다.
-      </p>
-      {dish.id && <button type="button" onClick={onTrain} className="mt-4 w-full rounded-full bg-gray-900 py-3 text-sm font-bold text-white">YOLO 모델 학습하기</button>}
-      {jobStatus && <p className="mt-2 text-xs text-gray-600">{jobStatus}</p>}
+      <p className="mt-1 text-xs text-gray-500">용기 무게를 제외한 반찬 중량을 입력하세요.</p>
+      <div className="mt-4 rounded-xl bg-gray-50 p-3 text-sm text-gray-700" role="status">
+        {summary ? `등록된 사진: 부족 ${summary.counts.under}장 · 정상 ${summary.counts.normal}장 · 초과 ${summary.counts.over}장` : "반찬 정보를 저장하면 사진 수가 표시됩니다."}
+        {summary?.modelReady && <p className="mt-1 font-semibold text-green-700">학습된 모델 있음</p>}
+      </div>
+      <button type="button" onClick={onTrain} className="mt-4 w-full rounded-full bg-gray-900 py-3 text-sm font-bold text-white">YOLO 모델 학습하기</button>
+      <p className="mt-2 text-xs text-gray-500">현재 모델은 부족·정상·초과 사진을 각각 최소 5장 등록해야 학습할 수 있습니다.</p>
+      {jobStatus && <p role="status" className="mt-2 text-sm font-semibold text-gray-800">{jobStatus}</p>}
 
       <div className="mt-4 text-center">
         <button
