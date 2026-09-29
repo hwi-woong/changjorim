@@ -10,7 +10,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
@@ -60,13 +60,21 @@ async def save_image(photo: UploadFile, folder: Path):
                 raise HTTPException(400, "JPG, PNG, WEBP 이미지만 가능합니다.")
             im.verify()
         with Image.open(BytesIO(payload)) as im:
-            im = im.convert("RGB")
+            im = ImageOps.exif_transpose(im).convert("RGB")
             folder.mkdir(parents=True, exist_ok=True)
             path = folder / f"{uuid.uuid4().hex}.jpg"
             im.save(path, "JPEG", quality=90)
             return path
     except (UnidentifiedImageError, OSError, ValueError):
         raise HTTPException(400, "이미지를 읽을 수 없습니다.")
+
+
+def prepare_classification_image(source: Path, destination: Path):
+    """Keep the full tray visible instead of cropping away quantity cues."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with Image.open(source) as im:
+        square = ImageOps.pad(im.convert("RGB"), (320, 320), method=Image.Resampling.BICUBIC, color=(128, 128, 128))
+        square.save(destination, "JPEG", quality=95)
 
 
 @app.get("/api/dishes")
@@ -166,10 +174,8 @@ async def add_reference(dish_id: str, photo: UploadFile = File(...), weightGram:
 
 
 def train_worker(dish_id, job_id):
-    from ultralytics import YOLO
-    import shutil
-
     try:
+        from ultralytics import YOLO
         with db() as con:
             dish = dish_or_404(con, dish_id)
             grouped = {key: [] for key in LABELS}
@@ -187,14 +193,22 @@ def train_worker(dish_id, job_id):
                 target = dataset / split / category
                 target.mkdir(parents=True, exist_ok=True)
                 for path in items:
-                    shutil.copy2(path, target / path.name)
+                    prepare_classification_image(path, target / path.name)
         jobs[job_id]["status"] = "training"
         model = YOLO("yolo26n-cls.pt")
-        result = model.train(data=str(dataset), epochs=30, imgsz=224, project=str(DATA / "training"), name=job_id, exist_ok=True)
+        result = model.train(
+            data=str(dataset), epochs=30, imgsz=320, scale=0.0, erasing=0.0,
+            auto_augment=None, project=str(DATA / "training"), name=job_id, exist_ok=True,
+        )
         out = DATA / "models" / dish_id
         out.mkdir(parents=True, exist_ok=True)
         shutil.copy2(Path(result.save_dir) / "weights" / "best.pt", out / "best.pt")
-        (out / "metadata.json").write_text(json.dumps({"counts": {k: len(v) for k, v in grouped.items()}, "jobId": job_id}), encoding="utf-8")
+        validation_top1 = getattr(result, "top1", None)
+        (out / "metadata.json").write_text(json.dumps({
+            "counts": {k: len(v) for k, v in grouped.items()}, "jobId": job_id,
+            "validationTop1": float(validation_top1) if validation_top1 is not None else None,
+            "note": "Validation images are a small random split; independently captured test photos are required.",
+        }), encoding="utf-8")
         jobs[job_id]["status"] = "completed"
     except Exception as exc:
         jobs[job_id].update(status="failed", message=str(exc))
@@ -230,9 +244,11 @@ async def judge(dishId: str = Form(...), photo: UploadFile = File(...)):
     if not model_path.exists():
         raise HTTPException(409, "이 반찬은 아직 학습된 모델이 없습니다. 관리자 화면에서 사진을 등록하고 학습해주세요.")
     path = await save_image(photo, DATA / "predictions" / dishId)
+    prepared = path.with_name(f"{path.stem}-prepared.jpg")
     try:
         from ultralytics import YOLO
-        result = YOLO(str(model_path)).predict(source=str(path), verbose=False)[0]
+        prepare_classification_image(path, prepared)
+        result = YOLO(str(model_path)).predict(source=str(prepared), verbose=False)[0]
         probs = result.probs
         index = int(probs.top1)
         category = result.names[index]
@@ -240,6 +256,7 @@ async def judge(dishId: str = Form(...), photo: UploadFile = File(...)):
         verdict = {"under": "정량 미달 의심", "normal": "정상 가능성 높음", "over": "초과 의심"}.get(category, "확인 필요")
         if confidence < 0.75:
             verdict = "확인 필요"
-        return {"verdict": verdict, "confidencePercent": round(confidence * 100, 1), "reasoning": "사진 분류 결과입니다. 실제 중량은 저울로 확인하세요."}
+        return {"verdict": verdict, "confidencePercent": round(confidence * 100, 1), "reasoning": "사진 분류 모델의 출력 점수입니다. 실제 중량은 저울로 확인하세요."}
     finally:
         path.unlink(missing_ok=True)
+        prepared.unlink(missing_ok=True)
