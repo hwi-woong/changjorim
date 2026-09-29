@@ -27,6 +27,9 @@ export default function UploadFlow() {
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [measuredWeight, setMeasuredWeight] = useState("");
+  const [feedback, setFeedback] = useState(null);
+  const [savingFeedback, setSavingFeedback] = useState(false);
   const cameraInputRef = useRef(null);
   const galleryInputRef = useRef(null);
 
@@ -60,12 +63,14 @@ export default function UploadFlow() {
     setDishId(e.target.value);
     setResult(null);
     setError(null);
+    setFeedback(null);
   }
 
   function handleFileChange(e) {
     const selected = e.target.files?.[0];
     setError(null);
     setResult(null);
+    setFeedback(null);
 
     if (!selected) return;
 
@@ -118,9 +123,36 @@ export default function UploadFlow() {
     setFile(null);
     setPreviewUrl(null);
     setResult(null);
+    setFeedback(null);
+    setMeasuredWeight("");
     setError(null);
     if (cameraInputRef.current) cameraInputRef.current.value = "";
     if (galleryInputRef.current) galleryInputRef.current.value = "";
+  }
+
+  async function saveMeasuredResult() {
+    const weight = Number(measuredWeight);
+    if (!file || !selectedDish || !Number.isFinite(weight) || weight <= 0) {
+      setFeedback("저울로 잰 실제 중량을 입력해주세요.");
+      return;
+    }
+    setSavingFeedback(true);
+    setFeedback(null);
+    try {
+      const formData = new FormData();
+      formData.append("photo", file);
+      formData.append("weightGram", String(weight));
+      const response = await fetch(`/api/dishes/${selectedDish.id}/reference-photos`, { method: "POST", body: formData });
+      if (!response.ok) {
+        const body = await response.json().catch(() => null);
+        throw new Error(body?.detail || "실측 결과를 저장하지 못했습니다.");
+      }
+      setFeedback(`실측 ${weight}g과 사진을 학습 데이터로 저장했습니다. 이후 관리자 화면에서 다시 학습하면 반영됩니다.`);
+    } catch (err) {
+      setFeedback(err.message || "저장에 실패했습니다.");
+    } finally {
+      setSavingFeedback(false);
+    }
   }
 
   return (
@@ -242,8 +274,14 @@ export default function UploadFlow() {
               <h2 className="text-base font-bold">판정 결과</h2>
               <p className="mt-3 text-lg font-bold">{result.verdict}</p>
               <p className="mt-1 text-sm">기준 중량: {selectedDish.baseWeightGram}g</p>
-              <p className="mt-1 text-sm">신뢰도: {result.confidencePercent}%</p>
-              <p className="mt-2 text-xs">사진 판정 결과이며 중량 측정값이 아닙니다.</p>
+              <p className="mt-1 text-sm">모델 출력 점수: {result.confidencePercent}%</p>
+              <p className="mt-2 text-xs">이 점수는 실제 정확도나 중량 측정값이 아닙니다.</p>
+              <div className="mt-5 border-t border-current/20 pt-4">
+                <label htmlFor="measured-weight" className="block text-sm font-bold">저울로 확인한 실제 중량 (g)</label>
+                <input id="measured-weight" type="number" min="0.1" step="0.1" value={measuredWeight} onChange={(e) => setMeasuredWeight(e.target.value)} placeholder="예: 25" className="mt-2 w-full rounded-xl border border-gray-300 bg-white p-3 text-gray-900" />
+                <button type="button" onClick={saveMeasuredResult} disabled={savingFeedback || feedback?.includes("학습 데이터로 저장했습니다")} className="mt-3 w-full rounded-full bg-gray-900 p-3 font-bold text-white disabled:opacity-50">{savingFeedback ? "저장 중..." : "실측 사진을 학습 데이터에 추가"}</button>
+                {feedback && <p role="status" className="mt-2 text-sm">{feedback}</p>}
+              </div>
             </section>
           )}
         </>
